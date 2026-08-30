@@ -65,29 +65,41 @@ $Query = @(
 ) -join "&"
 $AuthorizationUrl = "https://accounts.google.com/o/oauth2/v2/auth?$Query"
 
-$Listener = New-Object Net.HttpListener
-$Listener.Prefixes.Add($RedirectUri)
+$Listener = New-Object System.Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
 $Listener.Start()
 
 Write-Host "Opening Google authorization..." -ForegroundColor Cyan
 Start-Process $AuthorizationUrl
 
 try {
-    $Context = $Listener.GetContext()
-    $ReturnedState = $Context.Request.QueryString["state"]
-    $AuthorizationCode = $Context.Request.QueryString["code"]
-    $AuthorizationError = $Context.Request.QueryString["error"]
+    $TcpClient = $Listener.AcceptTcpClient()
+    $Stream = $TcpClient.GetStream()
+    $Reader = New-Object IO.StreamReader($Stream, [Text.Encoding]::ASCII, $false, 4096, $true)
+    $RequestLine = $Reader.ReadLine()
+    while ($Reader.ReadLine()) { }
+
+    $RequestTarget = ($RequestLine -split " ")[1]
+    Add-Type -AssemblyName System.Web
+    $CallbackUri = [Uri]("http://127.0.0.1:$Port$RequestTarget")
+    $Parameters = [Web.HttpUtility]::ParseQueryString($CallbackUri.Query)
+    $ReturnedState = $Parameters["state"]
+    $AuthorizationCode = $Parameters["code"]
+    $AuthorizationError = $Parameters["error"]
 
     $ResponseText = if ($AuthorizationCode -and $ReturnedState -eq $State) {
         "GOLIDE YouTube authorization completed. Return to PowerShell."
     } else {
         "GOLIDE authorization failed. Return to PowerShell."
     }
-    $ResponseBytes = [Text.Encoding]::UTF8.GetBytes($ResponseText)
-    $Context.Response.ContentType = "text/plain; charset=utf-8"
-    $Context.Response.ContentLength64 = $ResponseBytes.Length
-    $Context.Response.OutputStream.Write($ResponseBytes, 0, $ResponseBytes.Length)
-    $Context.Response.OutputStream.Close()
+    $ResponseBody = [Text.Encoding]::UTF8.GetBytes($ResponseText)
+    $ResponseHeader = "HTTP/1.1 200 OK`r`nContent-Type: text/plain; charset=utf-8`r`nContent-Length: $($ResponseBody.Length)`r`nConnection: close`r`n`r`n"
+    $HeaderBytes = [Text.Encoding]::ASCII.GetBytes($ResponseHeader)
+    $Stream.Write($HeaderBytes, 0, $HeaderBytes.Length)
+    $Stream.Write($ResponseBody, 0, $ResponseBody.Length)
+    $Stream.Flush()
+    $Reader.Dispose()
+    $Stream.Dispose()
+    $TcpClient.Dispose()
 
     if ($AuthorizationError) {
         throw "Google authorization failed: $AuthorizationError"
@@ -98,7 +110,6 @@ try {
 }
 finally {
     $Listener.Stop()
-    $Listener.Close()
 }
 
 $Token = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -Body @{
