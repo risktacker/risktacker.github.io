@@ -112,7 +112,7 @@ finally {
     $Listener.Stop()
 }
 
-$Token = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -Body @{
+$TokenBody = @{
     client_id = $Client.client_id
     client_secret = $Client.client_secret
     code = $AuthorizationCode
@@ -121,12 +121,52 @@ $Token = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/toke
     redirect_uri = $RedirectUri
 }
 
+try {
+    $Token = Invoke-RestMethod -Method Post -Uri "https://oauth2.googleapis.com/token" -Body $TokenBody
+}
+catch {
+    Write-Host "Primary Google token endpoint was unreachable; trying the compatibility endpoint..." -ForegroundColor Yellow
+    try {
+        $Token = Invoke-RestMethod -Method Post -Uri "https://accounts.google.com/o/oauth2/token" -Body $TokenBody
+    }
+    catch {
+        if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+            throw
+        }
+        $TokenResponse = & curl.exe -sS --connect-timeout 20 --max-time 60 -X POST "https://oauth2.googleapis.com/token" `
+            --data-urlencode "client_id=$($Client.client_id)" `
+            --data-urlencode "client_secret=$($Client.client_secret)" `
+            --data-urlencode "code=$AuthorizationCode" `
+            --data-urlencode "code_verifier=$CodeVerifier" `
+            --data-urlencode "grant_type=authorization_code" `
+            --data-urlencode "redirect_uri=$RedirectUri"
+        if ($LASTEXITCODE -ne 0) {
+            throw "PowerShell and curl could not reach Google's token server. Switch to a mobile hotspot and run the command again."
+        }
+        $Token = $TokenResponse | ConvertFrom-Json
+    }
+}
+
 if (-not $Token.refresh_token) {
     throw "Google did not return a fresh refresh token."
 }
 
-$Channel = Invoke-RestMethod -Method Get -Uri "https://www.googleapis.com/youtube/v3/channels?part=id%2Csnippet&mine=true" -Headers @{
-    Authorization = "Bearer $($Token.access_token)"
+try {
+    $Channel = Invoke-RestMethod -Method Get -Uri "https://www.googleapis.com/youtube/v3/channels?part=id%2Csnippet&mine=true" -Headers @{
+        Authorization = "Bearer $($Token.access_token)"
+    }
+}
+catch {
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) {
+        throw
+    }
+    $ChannelResponse = & curl.exe -sS --connect-timeout 20 --max-time 60 `
+        -H "Authorization: Bearer $($Token.access_token)" `
+        "https://www.googleapis.com/youtube/v3/channels?part=id%2Csnippet&mine=true"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not reach the YouTube API. Switch to a mobile hotspot and run the command again."
+    }
+    $Channel = $ChannelResponse | ConvertFrom-Json
 }
 
 $ExpectedChannelId = "UCqaXVBSBz7iQsRHOupKt-3w"
